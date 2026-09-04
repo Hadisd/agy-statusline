@@ -21,6 +21,9 @@ import json
 import time
 import shutil
 import subprocess
+import tempfile
+import urllib.error
+import urllib.request
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -180,19 +183,26 @@ def _quota_pct(bucket: Dict[str, Any]) -> float:
         return 100.0 - bucket["remaining_percentage"]
     return 0.0
 
-def find_quota_buckets(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def find_quota_buckets(data: Dict[str, Any]) -> Tuple[Tuple[str, Dict[str, Any]], Tuple[str, Dict[str, Any]]]:
     """Finds the weekly and five-hour quota buckets for the active model's group.
+
+    Returns ((weekly_key, weekly), (five_hour_key, five_hour)) — the source
+    key comes back alongside the bucket so callers can track a bucket's
+    freshness across renders (see quota_ages()).
 
     Antigravity CLI splits quota per model family rather than one global
     bucket (confirmed via `/usage`, which shows separate "GEMINI MODELS" and
     "CLAUDE AND GPT MODELS" groups, each with its own Weekly and Five Hour
-    limit). Exact JSON key spelling for these buckets isn't documented, so
-    they're matched by keyword instead of a fixed key name, and scoped to
-    whichever group the active model belongs to when more than one matches.
+    limit). Captured payloads from agy 1.1.25 spell these as "gemini-5h",
+    "gemini-weekly", "3p-5h", "3p-weekly" — note the non-Gemini group is
+    labelled "3p" (third-party), not "claude"/"gpt". Key spelling isn't
+    documented and has no stability guarantee, so buckets are still matched
+    by keyword rather than a fixed name, and scoped to whichever group the
+    active model belongs to when more than one matches.
     """
     quota = data.get("quota") or data.get("rate_limits") or {}
     if not isinstance(quota, dict):
-        return {}, {}
+        return ("", {}), ("", {})
 
     model_obj = data.get("model")
     model_name = ""
@@ -201,28 +211,259 @@ def find_quota_buckets(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, 
     elif isinstance(model_obj, str):
         model_name = model_obj.lower()
 
-    group_hint = ""
+    # Several spellings per group, most specific first: agy currently uses
+    # "3p-*" for the Claude/GPT group, but "claude"/"gpt" are kept as
+    # fallbacks so a rename doesn't silently drop us into the order-dependent
+    # matches[0] path below (which would then show the *Gemini* bucket while
+    # a Claude model is selected).
+    group_hints: List[str] = []
     if "claude" in model_name or "gpt" in model_name:
-        group_hint = "claude"
+        group_hints = ["3p", "claude", "gpt"]
     elif "gemini" in model_name:
-        group_hint = "gemini"
+        group_hints = ["gemini"]
 
-    def pick(keywords: List[str]) -> Dict[str, Any]:
+    def pick(keywords: List[str]) -> Tuple[str, Dict[str, Any]]:
         matches = [
             (k, v) for k, v in quota.items()
             if isinstance(v, dict) and any(kw in k.lower().replace("_", "-") for kw in keywords)
         ]
         if not matches:
-            return {}
-        if group_hint:
+            return "", {}
+        for hint in group_hints:
             for k, v in matches:
-                if group_hint in k.lower():
-                    return v
-        return matches[0][1]
+                if hint in k.lower():
+                    return k, v
+        return matches[0]
 
     weekly = pick(["week", "7d"])
     five_hour = pick(["five-hour", "fivehour", "5h", "5-hour"])
     return weekly, five_hour
+
+# agy refreshes quota from the server on its own throttled schedule
+# (quota_manager.go: "doRefreshQuota: skipped (throttled)"), with observed
+# gaps between real reloads of up to ~85 minutes, while it re-runs this
+# statusline many times per second. The same remaining_fraction therefore
+# gets re-sent unchanged for a long time, and a bar that never moves next to
+# a ticking clock reads as broken rather than stale. Track when each bucket's
+# value last actually changed so a frozen number can say so.
+_QUOTA_STALE_AFTER = 600.0
+
+def _quota_state_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(base) / "agy-statusline" / "quota_state.json"
+
+def quota_ages(entries: List[Tuple[str, float]]) -> Dict[str, float]:
+    """Seconds since each named bucket's percentage last changed.
+
+    State lives in a small cache file. Every failure mode here (unreadable,
+    corrupt, unwritable, read-only home) degrades to "no age known" rather
+    than raising — a freshness hint is never worth losing the statusline
+    over. Writes only happen when a value actually changed, so the common
+    case is one read per render.
+    """
+    entries = [(k, p) for k, p in entries if k]
+    if not entries:
+        return {}
+
+    now = time.time()
+    path = _quota_state_path()
+    try:
+        state = json.loads(path.read_text())
+        if not isinstance(state, dict):
+            state = {}
+    except Exception:
+        state = {}
+
+    ages: Dict[str, float] = {}
+    dirty = False
+    for key, pct in entries:
+        prev = state.get(key)
+        unchanged = (
+            isinstance(prev, list) and len(prev) == 2
+            and isinstance(prev[0], (int, float)) and isinstance(prev[1], (int, float))
+            and abs(prev[0] - pct) < 1e-9
+        )
+        if unchanged:
+            # Clamp: a clock jump backwards must not read as a huge age.
+            ages[key] = max(0.0, now - prev[1])
+        else:
+            state[key] = [pct, now]
+            ages[key] = 0.0
+            dirty = True
+
+    if dirty:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Unique tmp name + atomic rename: agy fires many renders per
+            # second, so concurrent writers are the norm, not the exception.
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    return ages
+
+# ---------------------------------------------------------------------------
+# Optional live quota (AGY_STATUSLINE_LIVE_QUOTA=1, off by default)
+# ---------------------------------------------------------------------------
+# agy's own quota reload is triggered by model responses but skips long
+# stretches of heavy use — measured against its logs, up to 13.8 hours and 802
+# model responses without a single refresh — so the bars are least accurate
+# exactly when quota is being spent fastest. When enabled, we fetch the same
+# numbers ourselves on a 60s cache.
+#
+# Caveats, deliberately opt-in because of them:
+#   * v1internal is an undocumented internal endpoint with no stability or
+#     access guarantee; it can change or start refusing us at any time.
+#   * It only answers to a User-Agent carrying the "antigravity-cli/<version>"
+#     product token (verified: our own UA alone returns 403
+#     SUBSCRIPTION_REQUIRED), so we send that plus our own identifier rather
+#     than posing as agy outright.
+#   * It reads agy's OAuth token from disk. We never refresh, log or copy that
+#     token — expired means fall back to agy's payload and let agy renew it.
+# Every failure path degrades to the payload agy already gave us.
+_LIVE_QUOTA_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+_LIVE_QUOTA_TTL = 60.0          # how long a fetched snapshot counts as current
+_LIVE_QUOTA_INFLIGHT = 30.0     # lock lifetime; agy renders many times a second
+_LIVE_QUOTA_BACKOFF = 300.0     # quiet period after a failed fetch
+_LIVE_QUOTA_TIMEOUT = 10.0
+_AGY_TOKEN_PATH = Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+_DEFAULT_AGY_VERSION = "1.1.25"
+
+def live_quota_enabled() -> bool:
+    return os.environ.get("AGY_STATUSLINE_LIVE_QUOTA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+def _live_quota_path() -> Path:
+    return _quota_state_path().with_name("quota_live.json")
+
+def _read_json_file(path: Path) -> Dict[str, Any]:
+    try:
+        val = json.loads(path.read_text())
+        return val if isinstance(val, dict) else {}
+    except Exception:
+        return {}
+
+def _seconds_until(iso: str) -> Optional[int]:
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    delta = dt.timestamp() - time.time()
+    return int(delta) if delta > 0 else None
+
+def fetch_quota_summary(agy_version: str) -> Dict[str, Any]:
+    """Fetch quota and reshape it into exactly the dict agy puts in the
+    payload — same bucket ids (gemini-5h, gemini-weekly, 3p-5h, 3p-weekly),
+    same remaining_fraction/reset_time keys — so nothing downstream has to
+    know where the numbers came from."""
+    token = json.loads(_AGY_TOKEN_PATH.read_text())["token"]
+    req = urllib.request.Request(
+        _LIVE_QUOTA_URL,
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {token['access_token']}",
+            "Content-Type": "application/json",
+            "User-Agent": f"antigravity-cli/{agy_version} agy-statusline/1.0",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=_LIVE_QUOTA_TIMEOUT) as resp:
+        body = json.loads(resp.read().decode())
+
+    quota: Dict[str, Any] = {}
+    for group in body.get("groups", []):
+        for bucket in (group or {}).get("buckets", []):
+            bucket_id = (bucket or {}).get("bucketId")
+            if not bucket_id:
+                continue
+            entry: Dict[str, Any] = {}
+            frac = bucket.get("remainingFraction")
+            if isinstance(frac, (int, float)):
+                entry["remaining_fraction"] = frac
+            reset = bucket.get("resetTime")
+            if reset:
+                entry["reset_time"] = reset
+                secs = _seconds_until(reset)
+                if secs is not None:
+                    entry["reset_in_seconds"] = secs
+            if entry:
+                quota[bucket_id] = entry
+    if not quota:
+        raise ValueError("no buckets in response")
+    return quota
+
+def refresh_live_quota(agy_version: str) -> int:
+    """Background entry point (--refresh-quota). Writes the cache and exits.
+
+    A failure keeps the previous snapshot — a stale number that the ⌛ marker
+    will flag beats blanking the bars — and sets a backoff so a broken token
+    or a revoked endpoint doesn't turn into a request per render.
+    """
+    path = _live_quota_path()
+    state = _read_json_file(path)
+    try:
+        state["quota"] = fetch_quota_summary(agy_version)
+        state["ts"] = time.time()
+        state.pop("error", None)
+        state.pop("error_until", None)
+        rc = 0
+    except Exception as e:
+        state["error"] = f"{type(e).__name__}: {e}"[:200]
+        state["error_until"] = time.time() + _LIVE_QUOTA_BACKOFF
+        rc = 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    except Exception:
+        return 1
+    return rc
+
+def _spawn_quota_refresh(agy_version: str) -> None:
+    lock = _live_quota_path().with_name("quota_live.lock")
+    try:
+        if lock.exists() and (time.time() - lock.stat().st_mtime) < _LIVE_QUOTA_INFLIGHT:
+            return
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.touch()
+    except Exception:
+        return
+    argv = [sys.executable, os.path.abspath(__file__), "--refresh-quota", "--agy-version", agy_version]
+    try:
+        subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        pass
+
+def apply_live_quota(data: Dict[str, Any]) -> None:
+    """Overlay the self-fetched snapshot on the payload and, if it's aged out,
+    kick off a background refresh for the *next* render. Never blocks: the
+    statusline sits in the prompt path, so it must not wait on the network."""
+    if not live_quota_enabled():
+        return
+    state = _read_json_file(_live_quota_path())
+    quota = state.get("quota")
+    if isinstance(quota, dict) and quota:
+        data["quota"] = quota
+
+    now = time.time()
+    if now - state.get("ts", 0.0) < _LIVE_QUOTA_TTL:
+        return
+    if now < state.get("error_until", 0.0):
+        return
+    _spawn_quota_refresh(str(data.get("version") or _DEFAULT_AGY_VERSION))
+
+def _stale_marker(age: Optional[float]) -> str:
+    """⌛ + how long this number has been frozen, once it's stale enough to
+    be worth doubting. Placed after the percentage so the gradient color
+    (which encodes danger, not freshness) stays intact."""
+    if age is None or age < _QUOTA_STALE_AFTER:
+        return ""
+    return f" {C_SUBTEXT}⌛{format_time_remaining(int(age))}{RESET}"
 
 def read_stdin_json() -> Dict[str, Any]:
     if not sys.stdin.isatty():
@@ -433,17 +674,18 @@ def render_small(data: Dict[str, Any]):
     cr, cg, cb = get_context_color(ctx_pct)
     ctx_disp = f"🧠 {C_PINK}Ctx{RESET} {generate_bar(ctx_pct, 10, 'ctx')} {BOLD}\033[38;2;{cr};{cg};{cb}m{ctx_pct:.0f}%{RESET}{_warn_icon(ctx_pct)}"
 
-    w_data, f_data = find_quota_buckets(data)
-
+    (w_key, w_data), (f_key, f_data) = find_quota_buckets(data)
     f_pct = _quota_pct(f_data) if f_data else 0.0
+    w_pct = _quota_pct(w_data) if w_data else 0.0
+    ages = quota_ages([(f_key, f_pct), (w_key, w_pct)])
+
     f_reset = format_time_remaining(f_data.get("reset_in_seconds")) if f_data.get("reset_in_seconds") else ""
     fr, fg, fb = get_5h_color(f_pct)
-    f_disp = f"{C_LAVENDER}5H{RESET} {generate_bar(f_pct, 10, '5h')} {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)}" + (f" ({f_reset})" if f_reset else "")
+    f_disp = f"{C_LAVENDER}5H{RESET} {generate_bar(f_pct, 10, '5h')} {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)}{_stale_marker(ages.get(f_key))}" + (f" ({f_reset})" if f_reset else "")
 
-    w_pct = _quota_pct(w_data) if w_data else 0.0
     w_reset = format_reset_day(w_data.get("reset_time") or w_data.get("reset_in_seconds")) if (w_data.get("reset_time") or w_data.get("reset_in_seconds")) else ""
     wr, wg, wb = get_7d_color(w_pct)
-    w_disp = f"{C_YELLOW}7D{RESET} {generate_bar(w_pct, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)}" + (f" ({w_reset})" if w_reset else "")
+    w_disp = f"{C_YELLOW}7D{RESET} {generate_bar(w_pct, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)}{_stale_marker(ages.get(w_key))}" + (f" ({w_reset})" if w_reset else "")
 
     line2 = f"{ctx_disp} │ {f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
     print(f"{line1}{CLR}\n{line2}{CLR}")
@@ -480,17 +722,18 @@ def render_medium(data: Dict[str, Any]):
     cr, cg, cb = get_context_color(ctx_pct)
     ctx_disp = f"🧠 {C_PINK}Context{RESET} {generate_bar(ctx_pct, 10, 'ctx')} {BOLD}\033[38;2;{cr};{cg};{cb}m{ctx_pct:.0f}%{RESET}{_warn_icon(ctx_pct)}"
 
-    w_data, f_data = find_quota_buckets(data)
-
+    (w_key, w_data), (f_key, f_data) = find_quota_buckets(data)
     f_pct = _quota_pct(f_data) if f_data else 0.0
+    w_pct = _quota_pct(w_data) if w_data else 0.0
+    ages = quota_ages([(f_key, f_pct), (w_key, w_pct)])
+
     f_reset = format_time_remaining(f_data.get("reset_in_seconds")) if f_data.get("reset_in_seconds") else ""
     fr, fg, fb = get_5h_color(f_pct)
-    f_disp = f"{C_LAVENDER}5H{RESET} {generate_bar(f_pct, 10, '5h')} {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)}" + (f" ({f_reset})" if f_reset else "")
+    f_disp = f"{C_LAVENDER}5H{RESET} {generate_bar(f_pct, 10, '5h')} {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)}{_stale_marker(ages.get(f_key))}" + (f" ({f_reset})" if f_reset else "")
 
-    w_pct = _quota_pct(w_data) if w_data else 0.0
     w_reset = format_reset_day(w_data.get("reset_time") or w_data.get("reset_in_seconds")) if (w_data.get("reset_time") or w_data.get("reset_in_seconds")) else ""
     wr, wg, wb = get_7d_color(w_pct)
-    w_disp = f"{C_YELLOW}7D{RESET} {generate_bar(w_pct, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)}" + (f" ({w_reset})" if w_reset else "")
+    w_disp = f"{C_YELLOW}7D{RESET} {generate_bar(w_pct, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)}{_stale_marker(ages.get(w_key))}" + (f" ({w_reset})" if w_reset else "")
 
     line3 = f"{ctx_disp} │ {f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
     print(f"{line1}{CLR}\n{line2}{CLR}\n{line3}{CLR}")
@@ -554,17 +797,18 @@ def render_large(data: Dict[str, Any]):
     ctx_bar = generate_bar(ctx_pct, 20, "ctx")
     line3 = f"🧠 Context Window: {BOLD}\033[38;2;{cr};{cg};{cb}m{ctx_pct:.1f}%{RESET}{_warn_icon(ctx_pct)} [{ctx_bar}] ({used_k} / {size_m} tokens)"
 
-    w_data, f_data = find_quota_buckets(data)
-
+    (w_key, w_data), (f_key, f_data) = find_quota_buckets(data)
     f_pct = _quota_pct(f_data) if f_data else 0.0
+    w_pct = _quota_pct(w_data) if w_data else 0.0
+    ages = quota_ages([(f_key, f_pct), (w_key, w_pct)])
+
     f_reset = format_time_remaining(f_data.get("reset_in_seconds")) if f_data.get("reset_in_seconds") else ""
     fr, fg, fb = get_5h_color(f_pct)
-    f_disp = f"⏱️ 5H Quota: {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)} [{generate_bar(f_pct, 12, '5h')}]" + (f" ({f_reset})" if f_reset else "")
+    f_disp = f"⏱️ 5H Quota: {BOLD}\033[38;2;{fr};{fg};{fb}m{f_pct:.0f}%{RESET}{_warn_icon(f_pct)} [{generate_bar(f_pct, 12, '5h')}]{_stale_marker(ages.get(f_key))}" + (f" ({f_reset})" if f_reset else "")
 
-    w_pct = _quota_pct(w_data) if w_data else 0.0
     w_reset = format_reset_day(w_data.get("reset_time") or w_data.get("reset_in_seconds")) if (w_data.get("reset_time") or w_data.get("reset_in_seconds")) else ""
     wr, wg, wb = get_7d_color(w_pct)
-    w_disp = f"📅 7D Quota: {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)} [{generate_bar(w_pct, 12, '7d')}]" + (f" ({w_reset})" if w_reset else "")
+    w_disp = f"📅 7D Quota: {BOLD}\033[38;2;{wr};{wg};{wb}m{w_pct:.0f}%{RESET}{_warn_icon(w_pct)} [{generate_bar(w_pct, 12, '7d')}]{_stale_marker(ages.get(w_key))}" + (f" ({w_reset})" if w_reset else "")
 
     line4 = f"{f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
     print(f"{line1}{CLR}\n{line2}{CLR}\n{line3}{CLR}\n{line4}{CLR}")
@@ -579,7 +823,9 @@ def render_micro(data: Dict[str, Any]):
     cr, cg, cb = get_context_color(ctx_pct)
     ctx_disp = f"{C_PINK}Ctx{RESET} {BOLD}\033[38;2;{cr};{cg};{cb}m{ctx_pct:.0f}%{RESET}{_warn_icon(ctx_pct)}"
 
-    w_data, f_data = find_quota_buckets(data)
+    # No ⌛ staleness marker here: micro is percentages-only by contract, and
+    # in a pane this narrow the extra glyphs cost more than they tell you.
+    (_, w_data), (_, f_data) = find_quota_buckets(data)
 
     f_pct = _quota_pct(f_data) if f_data else 0.0
     fr, fg, fb = get_5h_color(f_pct)
@@ -637,37 +883,92 @@ def maybe_shrink(size: str) -> str:
             return candidate
     return "micro"
 
+# Quota block copied verbatim from an agy 1.1.25 statusline payload, so the
+# selftest exercises the real key spelling and the real value encoding
+# (remaining_fraction, not used_percentage) rather than an invented shape.
+_LIVE_QUOTA = {
+    "3p-5h": {"remaining_fraction": 1, "reset_time": "2026-09-04T04:13:30Z", "reset_in_seconds": 13639},
+    "3p-weekly": {"remaining_fraction": 1, "reset_time": "2026-09-10T23:13:30Z", "reset_in_seconds": 600439},
+    "gemini-5h": {"remaining_fraction": 0.9045697, "reset_time": "2026-09-04T03:45:44Z", "reset_in_seconds": 11973},
+    "gemini-weekly": {"remaining_fraction": 0.9840949, "reset_time": "2026-09-10T22:45:44Z", "reset_in_seconds": 598773},
+}
+
+def _test_bucket_scoping() -> bool:
+    """The active model must select its own group's buckets, not whichever
+    happens to be first in the payload. agy emits the 3p-* pair first, so a
+    broken group hint still looks correct for Claude/GPT and only shows up
+    as a wrong number on Gemini — check both directions.
+    """
+    cases = [
+        ("Gemini 3.8 Flash (High)", "gemini-weekly", "gemini-5h"),
+        ("Claude Sonnet 4.5", "3p-weekly", "3p-5h"),
+        ("GPT-5.1 (Medium)", "3p-weekly", "3p-5h"),
+    ]
+    ok = True
+    for model, want_w, want_f in cases:
+        (w_key, _), (f_key, _) = find_quota_buckets(
+            {"model": {"display_name": model}, "quota": _LIVE_QUOTA}
+        )
+        if (w_key, f_key) != (want_w, want_f):
+            ok = False
+            print(
+                f"FAIL bucket scoping for {model!r}: got ({w_key!r}, {f_key!r}), "
+                f"want ({want_w!r}, {want_f!r})",
+                file=sys.stderr,
+            )
+    return ok
+
 def selftest() -> bool:
     sample_payloads = [
         {},
         {
-            "model": {"display_name": "Test Model"}, "cycle_mode": "plan", "agent_state": "working",
-            "artifact_count": 2, "task_count": 1,
+            "model": {"display_name": "Gemini 3.8 Flash (High)"}, "cycle_mode": "plan",
+            "agent_state": "working", "artifact_count": 2, "task_count": 1,
             "context_window": {"used_percentage": 92},
-            "quota": {"five_hour_gemini": {"used_percentage": 95}, "week_gemini": {"used_percentage": 40}},
+            "quota": _LIVE_QUOTA,
         },
         {"model": "bare-string-model", "agent_state": "thinking"},
     ]
-    ok = True
-    for size in RENDERERS:
-        for theme in THEMES:
-            apply_theme(theme)
-            for payload in sample_payloads:
-                try:
-                    with redirect_stdout(io.StringIO()):
-                        RENDERERS[size](payload)
-                except Exception as e:
-                    ok = False
-                    print(f"FAIL size={size} theme={theme} payload_keys={list(payload.keys())}: {e!r}", file=sys.stderr)
+    ok = _test_bucket_scoping()
+    # Rendering writes bucket freshness state; keep the fixture's fake
+    # percentages out of the real cache, which would otherwise reset the
+    # user's live staleness tracking every time they run --selftest.
+    with tempfile.TemporaryDirectory() as cache_dir:
+        prev_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = cache_dir
+        try:
+            for size in RENDERERS:
+                for theme in THEMES:
+                    apply_theme(theme)
+                    for payload in sample_payloads:
+                        try:
+                            with redirect_stdout(io.StringIO()):
+                                RENDERERS[size](payload)
+                        except Exception as e:
+                            ok = False
+                            print(f"FAIL size={size} theme={theme} payload_keys={list(payload.keys())}: {e!r}", file=sys.stderr)
+        finally:
+            if prev_cache is None:
+                os.environ.pop("XDG_CACHE_HOME", None)
+            else:
+                os.environ["XDG_CACHE_HOME"] = prev_cache
     apply_theme(DEFAULT_THEME)
     combos = len(RENDERERS) * len(THEMES) * len(sample_payloads)
     if ok:
-        print(f"selftest OK — {combos} combinations rendered without error")
+        print(f"selftest OK — bucket scoping + {combos} combinations rendered without error")
     else:
         print("selftest FAILED — see stderr for details", file=sys.stderr)
     return ok
 
 def main():
+    if "--refresh-quota" in sys.argv:
+        version = _DEFAULT_AGY_VERSION
+        if "--agy-version" in sys.argv:
+            idx = sys.argv.index("--agy-version")
+            if idx + 1 < len(sys.argv):
+                version = sys.argv[idx + 1]
+        sys.exit(refresh_live_quota(version))
+
     size = "large"
     if "--size" in sys.argv:
         idx = sys.argv.index("--size")
@@ -689,6 +990,7 @@ def main():
         size = maybe_shrink(size)
 
     data = read_stdin_json()
+    apply_live_quota(data)
 
     try:
         RENDERERS[size](data)

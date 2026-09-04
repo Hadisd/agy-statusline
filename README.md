@@ -48,6 +48,22 @@ Restart `agy` afterward. Re-running swaps the previous install (settings backed 
 
 🤖 model · 🎯 permission mode (plan/accept-edits) · 📂 path · 🌿 git branch + dirty status · 📄/⚙️ artifact & task counts · 🧠 context window · 5H/7D quota bars (scoped to the active model's group) · ⚠️ once any of those crosses 90%.
 
+### Quota bars that don't move
+
+`agy` refreshes quota on its own schedule and re-sends the last value on every render. Its logs show gaps of 13.8 hours covering 802 model responses. The bar sits still because the number does.
+
+When a value hasn't changed in 10 minutes, `small`/`medium`/`large` add a dim `⌛32m` after the percentage. No marker means it's current. `/usage` in `agy` forces a refresh.
+
+To fix it instead of flagging it, add this to your `statusline.sh`:
+
+```bash
+export AGY_STATUSLINE_LIVE_QUOTA=1
+```
+
+The statusline then fetches quota itself on a 60s cache. It draws the cached copy and refreshes in the background, so the prompt never waits on the network. On failure it falls back to `agy`'s number with the `⌛` age.
+
+Off by default for good reason. It calls `v1internal:retrieveUserQuotaSummary`, which is undocumented, can change or close without notice, and only answers to a `User-Agent` carrying `antigravity-cli/<version>`. It reads `agy`'s OAuth token from `~/.gemini/antigravity-cli/` and never refreshes, logs, or copies it. An expired token just skips the fetch.
+
 No Nerd Font needed: every glyph is a standard emoji/Unicode block.
 
 ## Requirements
