@@ -18,6 +18,7 @@ import os
 import sys
 import io
 import json
+import math
 import time
 import shutil
 import subprocess
@@ -247,7 +248,13 @@ def _quota_cache_path() -> Path:
 def _read_quota_cache() -> Dict[str, Any]:
     try:
         state = json.loads(_quota_cache_path().read_text())
-        return state if isinstance(state, dict) else {}
+        if not isinstance(state, dict):
+            return {}
+        for key in ("ts", "retry_after"):
+            value = state.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                return {}
+        return state
     except (OSError, ValueError):
         return {}
 
@@ -324,10 +331,20 @@ def apply_live_quota(data: Dict[str, Any]) -> None:
     cached = state.get("quota")
     if isinstance(cached, dict) and cached:
         quota = _safe_dict(data.get("quota") or data.get("rate_limits"))
-        data["quota"] = {**quota, **{
-            key: {**bucket, "_stale": age > 120}
-            for key, bucket in cached.items() if isinstance(bucket, dict)
-        }}
+        live = {}
+        for key, bucket in cached.items():
+            if not isinstance(bucket, dict):
+                continue
+            live[key] = {**bucket, "_stale": age > 120}
+            reset_time = bucket.get("reset_time")
+            if isinstance(reset_time, str):
+                try:
+                    reset = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
+                    live[key]["reset_in_seconds"] = max(0, int(reset.timestamp() - now))
+                except (ValueError, OverflowError, OSError):
+                    pass
+        # Cached aliases must precede session keys because selection uses order.
+        data["quota"] = {**live, **{key: bucket for key, bucket in quota.items() if key not in live}}
     if age < 60 or now < state.get("retry_after", 0):
         return
     lock = _quota_cache_path().with_suffix(".lock")
