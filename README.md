@@ -48,6 +48,9 @@ Restart `agy` afterward. Re-running swaps the previous install (settings backed 
 
 🤖 model · 🎯 permission mode (plan/accept-edits) · 📂 path · 🌿 git branch + dirty status · 📄/⚙️ artifact & task counts · 🧠 context window · 5H/7D quota bars (scoped to the active model's group) · ⚠️ once any of those crosses 90%.
 
+Argon models show `🔥` after the name in every size, for example
+`Gemini 4 Argon 🔥 (Medium)`.
+
 Quota bars show **used** quota. For example, `/usage` reporting 69% remaining
 corresponds to 31% used in the statusline. Argon's separate weekly bucket is
 selected on Pro plans; a missing 5H limit displays `N/A`.
