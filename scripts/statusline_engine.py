@@ -19,6 +19,7 @@ import sys
 import io
 import json
 import math
+import re
 import time
 import shutil
 import subprocess
@@ -384,11 +385,12 @@ def _safe_dict(v: Any) -> Dict[str, Any]:
 
 def get_model_name(data: Dict[str, Any]) -> str:
     model_obj = data.get("model")
+    model_name = os.environ.get("AGY_MODEL", "Gemini 3.6 Flash (High)")
     if isinstance(model_obj, dict):
-        return model_obj.get("display_name") or model_obj.get("id") or os.environ.get("AGY_MODEL", "Gemini 3.6 Flash (High)")
-    if isinstance(model_obj, str) and model_obj.strip():
-        return model_obj
-    return os.environ.get("AGY_MODEL", "Gemini 3.6 Flash (High)")
+        model_name = model_obj.get("display_name") or model_obj.get("id") or model_name
+    elif isinstance(model_obj, str) and model_obj.strip():
+        model_name = model_obj
+    return re.sub(r"\bargon\b", r"\g<0> 🔥", model_name, flags=re.IGNORECASE)
 
 def format_dir_path(cwd: str, max_len: Optional[int] = None) -> str:
     home = os.path.expanduser("~")
