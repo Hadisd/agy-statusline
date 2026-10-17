@@ -470,6 +470,9 @@ def resolve_execution_mode(data: Dict[str, Any]) -> str:
 
     return ""
 
+def format_git_sync(counts: Dict[str, int]) -> str:
+    return "".join(f" {C_CYAN}{arrow}{counts[key]}{RESET}" for key, arrow in (("ahead", "↑"), ("behind", "↓")) if counts.get(key))
+
 def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict[str, int], str]:
     """Returns (branch, git_disp, counts, mod_disp).
 
@@ -496,7 +499,7 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
             ).stdout.strip() or "HEAD"
 
         status_raw = subprocess.run(
-            ["git", "-C", cwd, "status", "--porcelain"],
+            ["git", "-C", cwd, "status", "--porcelain", "--branch", "--ahead-behind"],
             capture_output=True, text=True, check=False, timeout=2
         ).stdout
 
@@ -505,6 +508,9 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
         # (e.g. " M" = unstaged-only); stripping the full string eats that
         # space off the first line and misclassifies it as staged.
         status_lines = [l for l in status_raw.splitlines() if l.strip()]
+        header = status_lines.pop(0) if status_lines and status_lines[0].startswith("## ") else ""
+        ahead = re.search(r"\bahead (\d+)", header)
+        behind = re.search(r"\bbehind (\d+)", header)
 
         # Unmerged (conflicted) entries use XY codes like "UU", "AA", "DD",
         # "AU", "UA", "UD", "DU" — neither X nor Y alone reliably means
@@ -519,7 +525,11 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
         unstaged = sum(1 for l in status_lines if l[:2] not in conflict_codes and l[1] in "MD")
         untracked = sum(1 for l in status_lines if l.startswith("??"))
 
-        counts = {"staged": staged, "unstaged": unstaged, "untracked": untracked, "conflicted": conflicted}
+        counts = {
+            "staged": staged, "unstaged": unstaged, "untracked": untracked, "conflicted": conflicted,
+            "ahead": int(ahead.group(1)) if ahead else 0,
+            "behind": int(behind.group(1)) if behind else 0,
+        }
 
         if not status_lines:
             mod_disp = f"{C_GREEN}✅{RESET}"
@@ -531,7 +541,7 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
             if untracked > 0: symbols += f"{C_SUBTEXT}?{RESET}"
             mod_disp = f"📝{symbols}"
 
-        git_disp = f"{C_GREEN}🌿({branch}){RESET}{mod_disp}"
+        git_disp = f"{C_GREEN}🌿({branch}){RESET}{format_git_sync(counts)}{mod_disp}"
 
         return branch, git_disp, counts, mod_disp
     except Exception:
@@ -666,15 +676,16 @@ def render_large(data: Dict[str, Any]):
 
     branch, _, counts, _ = get_git_status(cwd, data.get("vcs"))
     if branch:
+        branch_disp = f"{C_GREEN}{branch}{RESET}{format_git_sync(counts)}"
         staged, unstaged, untracked = counts["staged"], counts["unstaged"], counts["untracked"]
         conflicted = counts.get("conflicted", 0)
         if staged == 0 and unstaged == 0 and untracked == 0 and conflicted == 0:
-            git_disp = f"🌿 Git: {C_GREEN}{branch}{RESET} {C_GREEN}✅ Clean{RESET}"
+            git_disp = f"🌿 Git: {branch_disp} {C_GREEN}✅ Clean{RESET}"
         else:
             conflict_part = f", conflicted: {C_RED}{conflicted}{RESET}" if conflicted else ""
             status_label = f"{C_RED}⚠️ Conflict{RESET}" if conflicted else f"{C_YELLOW}📝 Modified{RESET}"
             git_disp = (
-                f"🌿 Git: {C_GREEN}{branch}{RESET} "
+                f"🌿 Git: {branch_disp} "
                 f"(staged: {C_GREEN}{staged}{RESET}, unstaged: {C_YELLOW}{unstaged}{RESET}, untracked: {C_SUBTEXT}{untracked}{RESET}{conflict_part}) "
                 f"{status_label}"
             )
