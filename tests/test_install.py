@@ -113,5 +113,42 @@ class InstallEffortStyleTest(unittest.TestCase):
                 os.close(slave)
 
 
+    @unittest.skipUnless(shutil.which("curl"), "remote fetch failure check requires curl")
+    def test_remote_fetch_failure_reports_tip_and_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config"
+            env = {
+                **os.environ, "AGY_CONFIG_DIR": str(target), "LC_ALL": "C",
+                "AGY_STATUSLINE_RAW": "http://127.0.0.1:9",
+            }
+            master, slave = pty.openpty()
+
+            def attach_terminal():
+                os.setsid()
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+            try:
+                with subprocess.Popen(
+                    ["bash"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, env=env, pass_fds=(slave,),
+                    preexec_fn=attach_terminal,
+                ) as process:
+                    os.write(master, b"2\n2\n3\n")
+                    try:
+                        stdout, stderr = process.communicate(INSTALLER.read_bytes(), timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                        raise
+                    self.assertNotEqual(0, process.returncode)
+                output = stdout.decode() + stderr.decode()
+                self.assertIn("No local checkout found — fetching from GitHub…", output)
+                self.assertIn("Failed to fetch scripts/awesome-statusline-small.sh from GitHub.", output)
+                self.assertIn("git clone https://github.com/Hadisd/agy-statusline.git", output)
+            finally:
+                os.close(master)
+                os.close(slave)
+
+
 if __name__ == "__main__":
     unittest.main()

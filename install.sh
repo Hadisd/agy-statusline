@@ -52,10 +52,16 @@ REPO_RAW_BASE="${AGY_STATUSLINE_RAW:-https://raw.githubusercontent.com/Hadisd/ag
 
 fetch_remote() {
   # $1 = path relative to repo root, $2 = destination file
+  local url="$REPO_RAW_BASE/$1"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$REPO_RAW_BASE/$1" -o "$2"
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$2" 2>/dev/null; then
+      # Retry forcing IPv4 in case IPv6 routing hangs or blackholes
+      curl -4 -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$2"
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$2" "$REPO_RAW_BASE/$1"
+    if ! wget -q --timeout=10 --tries=2 -O "$2" "$url" 2>/dev/null; then
+      wget -4 -q --timeout=10 --tries=2 -O "$2" "$url"
+    fi
   else
     err "Need curl or wget to fetch $1 — neither is installed."
     return 1
@@ -275,13 +281,20 @@ else
   info "No local checkout found — fetching from GitHub…"
   TMP_WRAPPER="$(mktemp)"
   if ! fetch_remote "scripts/awesome-statusline-$MODE.sh" "$TMP_WRAPPER"; then
+    rm -f "$TMP_WRAPPER"
     err "Failed to fetch scripts/awesome-statusline-$MODE.sh from GitHub."
+    err "Tip: If raw.githubusercontent.com is blocked, slow, or times out on your network,"
+    err "     clone the repository and run ./install.sh directly:"
+    err "     git clone https://github.com/Hadisd/agy-statusline.git && cd agy-statusline && ./install.sh"
     exit 1
   fi
   WRAPPER_CONTENT="$(cat "$TMP_WRAPPER")"
   rm -f "$TMP_WRAPPER"
   if ! fetch_remote "scripts/statusline_engine.py" "$ENGINE_DEST"; then
     err "Failed to fetch scripts/statusline_engine.py from GitHub."
+    err "Tip: If raw.githubusercontent.com is blocked, slow, or times out on your network,"
+    err "     clone the repository and run ./install.sh directly:"
+    err "     git clone https://github.com/Hadisd/agy-statusline.git && cd agy-statusline && ./install.sh"
     exit 1
   fi
 fi
