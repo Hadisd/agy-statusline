@@ -390,6 +390,12 @@ def get_model_name(data: Dict[str, Any]) -> str:
         model_name = model_obj.get("display_name") or model_obj.get("id") or model_name
     elif isinstance(model_obj, str) and model_obj.strip():
         model_name = model_obj
+    if os.environ.get("AGY_STATUSLINE_EFFORT_STYLE", "dots").strip().lower() == "dots":
+        dots = {"low": "●○○", "medium": "●●○", "high": "●●●"}
+        model_name = re.sub(
+            r"\s*\((low|medium|high)\)\s*$",
+            lambda match: " " + dots[match.group(1).lower()], model_name, flags=re.IGNORECASE,
+        )
     return re.sub(r"\bargon\b", r"\g<0> 🔥", model_name, flags=re.IGNORECASE)
 
 def format_dir_path(cwd: str, max_len: Optional[int] = None) -> str:

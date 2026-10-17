@@ -49,7 +49,11 @@ Restart `agy` afterward. Re-running swaps the previous install (settings backed 
 🤖 model · 🎯 permission mode (plan/accept-edits) · 📂 path · 🌿 git branch + dirty status · 📄/⚙️ artifact & task counts · 🧠 context window · 5H/7D quota bars (scoped to the active model's group) · ⚠️ once any of those crosses 90%.
 
 Argon models show `🔥` after the name in every size, for example
-`Gemini 4 Argon 🔥 (Medium)`.
+`Gemini 4 Argon 🔥 ●●○`.
+
+Effort labels appear as dots: `●○○` for low, `●●○` for medium, and `●●●` for
+high. Set `AGY_STATUSLINE_EFFORT_STYLE=text` to keep the original labels such
+as `(Medium)`. Models without these effort labels keep their names.
 
 The Git segment in `small`, `medium`, and `large` shows upstream differences:
 `↑2 ↓1` means two commits to push and one to pull. Counts use the upstream
