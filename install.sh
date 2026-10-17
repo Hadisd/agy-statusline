@@ -3,11 +3,12 @@
 # Awesome Antigravity CLI Statusline — Installer (macOS / Linux)
 # ----------------------------------------------------------------------------
 # Usage:
-#   ./install.sh                        # install (prompts for size, then theme)
+#   ./install.sh                        # prompts for size, theme, effort style
 #   ./install.sh s                      # install small (2 lines), prompts for theme
 #   ./install.sh m dracula              # install medium (3 lines) with the Dracula theme
 #   ./install.sh l tokyo-night          # install large (4 lines) with the Tokyo Night theme
 #   ./install.sh xs nord                # install micro (1 line) with the Nord theme
+#   ./install.sh m dracula bars         # choose original / dots / bars / minimal
 #
 #   curl -fsSL https://raw.githubusercontent.com/Hadisd/agy-statusline/main/install.sh \
 #     | bash -s -- medium dracula       # no clone needed — fetches its own files from GitHub
@@ -82,6 +83,14 @@ normalize_theme() {
   esac
 }
 
+normalize_effort_style() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    original|text) echo "original" ;;
+    dots|bars|minimal) printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_jq() {
   if ! command -v jq >/dev/null 2>&1; then
     info "jq not found — attempting automatic install…"
@@ -100,6 +109,7 @@ ensure_jq() {
 
 MODE="large"
 THEME="mocha"
+EFFORT_STYLE="dots"
 
 is_korean_locale() {
   case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
@@ -181,6 +191,38 @@ prompt_theme() {
   esac
 }
 
+prompt_effort_style() {
+  echo
+  if is_korean_locale; then
+    echo "추론 강도 표시를 선택하세요 (기본값: dots)"
+  else
+    echo "How should model effort be displayed? (default: dots)"
+  fi
+  echo "  1. original — (Low) / (Medium) / (High)"
+  echo "  2. dots     — ●○○ / ●●○ / ●●●"
+  echo "  3. bars     — ▰▱▱ / ▰▰▱ / ▰▰▰"
+  echo "  4. minimal  — L / M / H"
+  if is_korean_locale; then
+    printf '선택 [기본값: 2 (dots)]: '
+  else
+    printf 'Choice [default: 2 (dots)]: '
+  fi
+  local answer=""
+  read -r answer || answer=""
+  case "$answer" in
+    1) EFFORT_STYLE="original" ;;
+    2|"") EFFORT_STYLE="dots" ;;
+    3) EFFORT_STYLE="bars" ;;
+    4) EFFORT_STYLE="minimal" ;;
+    *)
+      if ! EFFORT_STYLE="$(normalize_effort_style "$answer")"; then
+        echo "Unknown input '$answer', using 'dots'."
+        EFFORT_STYLE="dots"
+      fi
+      ;;
+  esac
+}
+
 if [ "$#" -ge 1 ]; then
   if ! MODE="$(normalize_mode "$1")"; then
     err "Unknown size: '$1'"
@@ -196,12 +238,23 @@ if [ "$#" -ge 1 ]; then
   elif [ -t 0 ]; then
     prompt_theme
   fi
+  if [ "$#" -ge 3 ]; then
+    if ! EFFORT_STYLE="$(normalize_effort_style "$3")"; then
+      err "Unknown effort style: '$3'"
+      err "Valid options: original, dots, bars, minimal"
+      exit 1
+    fi
+  elif [ -t 0 ]; then
+    prompt_effort_style
+  fi
 elif [ -t 0 ]; then
   prompt_size
   prompt_theme
+  prompt_effort_style
 elif { exec 3</dev/tty; } 2>/dev/null; then
   prompt_size <&3
   prompt_theme <&3
+  prompt_effort_style <&3
   exec 3<&-
 fi
 
@@ -233,10 +286,12 @@ else
   fi
 fi
 
-# Bake the chosen theme into the deployed wrapper via portable bash
+# Bake the theme and default effort style into the wrapper via portable bash
 # substring substitution (no sed -i, whose -i flag differs between
 # GNU and BSD/macOS).
 WRAPPER_CONTENT="${WRAPPER_CONTENT/--size $MODE \"\$@\"/--size $MODE --theme $THEME \"\$@\"}"
+EFFORT_EXPORT="export AGY_STATUSLINE_EFFORT_STYLE=\"\${AGY_STATUSLINE_EFFORT_STYLE:-$EFFORT_STYLE}\""
+WRAPPER_CONTENT="${WRAPPER_CONTENT/exec python3/$EFFORT_EXPORT$'\n'exec python3}"
 printf '%s\n' "$WRAPPER_CONTENT" > "$DEST"
 chmod +x "$DEST" "$ENGINE_DEST"
 
@@ -251,7 +306,7 @@ else
   jq -n --argjson sl "$STATUSLINE_JSON" '{statusLine: $sl}' > "$SETTINGS"
 fi
 
-ok "Installed Antigravity CLI Statusline (size: $MODE, theme: $THEME)"
+ok "Installed Antigravity CLI Statusline (size: $MODE, theme: $THEME, effort: $EFFORT_STYLE)"
 echo "  script:   $DEST"
 echo "  settings: $SETTINGS (statusLine configured)"
 echo

@@ -13,18 +13,19 @@ A themeable statusline for [Antigravity CLI](https://antigravity.google/) (`agy`
 curl -fsSL https://raw.githubusercontent.com/Hadisd/agy-statusline/main/install.sh | bash
 ```
 
-Or skip the prompt by specifying size (`micro`/`small`/`medium`/`large`) and theme (`mocha`/`tokyo-night`/`nord`/`dracula`/`gruvbox`) directly:
+The installer asks for size, theme, and effort style. Or skip the prompts by
+specifying all three directly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Hadisd/agy-statusline/main/install.sh | bash -s -- medium dracula
+curl -fsSL https://raw.githubusercontent.com/Hadisd/agy-statusline/main/install.sh | bash -s -- medium dracula bars
 ```
 
 Or from a local clone:
 
 ```bash
 git clone https://github.com/Hadisd/agy-statusline.git && cd agy-statusline
-bash install.sh                     # interactive size + theme prompt
-bash install.sh medium dracula      # or specify directly: micro/small/medium/large + theme
+bash install.sh                       # choose size, theme, and effort style
+bash install.sh medium dracula bars   # or specify all three directly
 ```
 
 Restart `agy` afterward. Re-running swaps the previous install (settings backed up automatically).
@@ -51,9 +52,19 @@ Restart `agy` afterward. Re-running swaps the previous install (settings backed 
 Argon models show `🔥` after the name in every size, for example
 `Gemini 4 Argon 🔥 ●●○`.
 
-Effort labels appear as dots: `●○○` for low, `●●○` for medium, and `●●●` for
-high. Set `AGY_STATUSLINE_EFFORT_STYLE=text` to keep the original labels such
-as `(Medium)`. Models without these effort labels keep their names.
+Choose an effort style during installation:
+
+| Style | Low | Medium | High |
+|---|---|---|---|
+| `original` | `(Low)` | `(Medium)` | `(High)` |
+| `dots` (default) | `●○○` | `●●○` | `●●●` |
+| `bars` | `▰▱▱` | `▰▰▱` | `▰▰▰` |
+| `minimal` | `L` | `M` | `H` |
+
+Your choice is saved in the installed wrapper. Set `AGY_STATUSLINE_EFFORT_STYLE`
+to override it; `text` also works as an alias for `original`. Models without
+these effort labels keep their names. Older install commands that omit the
+style use dots when run without an interactive terminal.
 
 The Git segment in `small`, `medium`, and `large` shows upstream differences:
 `↑2 ↓1` means two commits to push and one to pull. Counts use the upstream
@@ -83,8 +94,9 @@ No Nerd Font needed: every glyph is a standard emoji/Unicode block.
 
 `python3 scripts/statusline_engine.py --selftest` renders every size × theme combo against a few sample payloads and reports failures.
 
-`python3 -m unittest discover -s tests -v` checks quota selection and the complete
-background refresh flow using a local stand-in for the external `agy` command.
+`python3 -m unittest discover -s tests -v` checks Git sync indicators, installer
+choices, quota selection, and background refresh using temporary local repos,
+config directories, and a stand-in for the external `agy` command.
 
 ## Uninstall
 
