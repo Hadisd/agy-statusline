@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import subprocess
 import tempfile
@@ -79,3 +80,29 @@ class GitSyncTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitOptionalLocksTest(unittest.TestCase):
+    def test_status_does_not_rewrite_index(self):
+        """Rendering must not take .git/index.lock to refresh the index."""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+
+            def git(*args):
+                subprocess.run(
+                    ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                     "-c", "commit.gpgsign=false", "-C", str(repo), *args],
+                    capture_output=True, check=True, timeout=5,
+                )
+
+            git("init", "-b", "main")
+            (repo / "f.txt").write_text("x\n")
+            git("add", "f.txt")
+            git("commit", "-m", "init")
+            # Make the cached stat info stale so a plain `git status` would refresh (rewrite) the index.
+            os.utime(repo / "f.txt", (1_000_000_000, 1_000_000_000))
+            index = repo / ".git" / "index"
+            before = index.read_bytes()
+            statusline_engine.get_git_status(str(repo))
+            self.assertEqual(before, index.read_bytes())
+            self.assertFalse((repo / ".git" / "index.lock").exists())
