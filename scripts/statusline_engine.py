@@ -483,6 +483,11 @@ def resolve_execution_mode(data: Dict[str, Any]) -> str:
 def format_git_sync(counts: Dict[str, int]) -> str:
     return "".join(f" {C_CYAN}{arrow}{counts[key]}{RESET}" for key, arrow in (("ahead", "↑"), ("behind", "↓")) if counts.get(key))
 
+# A statusline polls git on every render. Without this, `git status` takes
+# .git/index.lock to opportunistically refresh the index, which races with the
+# user's own git commands ("Unable to create index.lock: File exists").
+GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+
 def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict[str, int], str]:
     """Returns (branch, git_disp, counts, mod_disp).
 
@@ -496,7 +501,7 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
         # git (network mount, huge repo, hooks) must never hang the CLI.
         is_git = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, check=False, timeout=2
+            capture_output=True, text=True, check=False, timeout=2, env=GIT_ENV
         ).stdout.strip()
 
         if is_git != "true":
@@ -505,12 +510,12 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
         if not branch:
             branch = subprocess.run(
                 ["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"],
-                capture_output=True, text=True, check=False, timeout=2
+                capture_output=True, text=True, check=False, timeout=2, env=GIT_ENV
             ).stdout.strip() or "HEAD"
 
         status_raw = subprocess.run(
             ["git", "-C", cwd, "status", "--porcelain", "--branch", "--ahead-behind"],
-            capture_output=True, text=True, check=False, timeout=2
+            capture_output=True, text=True, check=False, timeout=2, env=GIT_ENV
         ).stdout
 
         # NOTE: don't .strip() status_raw as a whole — porcelain status codes
