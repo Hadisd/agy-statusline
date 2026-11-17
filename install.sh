@@ -204,10 +204,10 @@ prompt_effort_style() {
   else
     echo "How should model effort be displayed? (default: dots)"
   fi
-  echo "  1. original — (Low) / (Medium) / (High)"
-  echo "  2. dots     — ●○○ / ●●○ / ●●●"
-  echo "  3. bars     — ▰▱▱ / ▰▰▱ / ▰▰▰"
-  echo "  4. minimal  — L / M / H"
+  echo "  1. original — (Low) / (Medium) / (High) / (XHigh) / (Max)"
+  echo "  2. dots     — ●○○ / ●●○ / ●●● / ●●●+ / ●●●⚡"
+  echo "  3. bars     — ▰▱▱ / ▰▰▱ / ▰▰▰ / ▰▰▰+ / ▰▰▰⚡"
+  echo "  4. minimal  — L / M / H / XH / MAX"
   if is_korean_locale; then
     printf '선택 [기본값: 2 (dots)]: '
   else

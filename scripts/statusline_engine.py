@@ -391,13 +391,13 @@ def get_model_name(data: Dict[str, Any]) -> str:
     elif isinstance(model_obj, str) and model_obj.strip():
         model_name = model_obj
     effort_labels = {
-        "dots": {"low": "●○○", "medium": "●●○", "high": "●●●"},
-        "bars": {"low": "▰▱▱", "medium": "▰▰▱", "high": "▰▰▰"},
-        "minimal": {"low": "L", "medium": "M", "high": "H"},
+        "dots": {"low": "●○○", "medium": "●●○", "high": "●●●", "xhigh": "●●●+", "max": "●●●⚡"},
+        "bars": {"low": "▰▱▱", "medium": "▰▰▱", "high": "▰▰▰", "xhigh": "▰▰▰+", "max": "▰▰▰⚡"},
+        "minimal": {"low": "L", "medium": "M", "high": "H", "xhigh": "XH", "max": "MAX"},
     }.get(os.environ.get("AGY_STATUSLINE_EFFORT_STYLE", "dots").strip().lower())
     if effort_labels:
         model_name = re.sub(
-            r"\s*\((low|medium|high)\)\s*$",
+            r"\s*\((low|medium|high|xhigh|max)\)\s*$",
             lambda match: " " + effort_labels[match.group(1).lower()], model_name, flags=re.IGNORECASE,
         )
     return re.sub(r"\bargon\b", r"\g<0> 🔥", model_name, flags=re.IGNORECASE)
@@ -566,10 +566,25 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
             return branch, f"{C_GREEN}🌿({branch}){RESET}{mod_disp}", {"staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0}, mod_disp
         return "", "", {"staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0}, ""
 
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+def _spinner() -> str:
+    return _SPINNER_FRAMES[int(time.time() * 4) % len(_SPINNER_FRAMES)]
+
+def _format_agent_state(data: Dict[str, Any], *, include_label: bool) -> str:
+    state = str(data.get("agent_state") or "").lower()
+    if state == "thinking":
+        glyph, color, label = (_spinner(), C_PINK, "thinking") if not include_label else ("🤔", C_PINK, "thinking")
+    elif state in ("working", "tool_use"):
+        glyph, color, label = _spinner(), C_CYAN, "working"
+    else:
+        return ""
+    suffix = f" {label}" if include_label else ""
+    return f" {color}{glyph}{suffix}{RESET}"
+
 def render_small(data: Dict[str, Any]):
     model_name = get_model_name(data)
-    state = data.get("agent_state", "").lower()
-    state_str = f" {C_PINK}🤔 thinking{RESET}" if state == "thinking" else (f" {C_CYAN}⚡ working{RESET}" if state in ["working", "tool_use"] else "")
+    state_str = _format_agent_state(data, include_label=False)
     model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
 
     exec_mode = resolve_execution_mode(data)
@@ -618,8 +633,7 @@ def render_small(data: Dict[str, Any]):
 
 def render_medium(data: Dict[str, Any]):
     model_name = get_model_name(data)
-    state = data.get("agent_state", "").lower()
-    state_str = f" {C_PINK}🤔 thinking{RESET}" if state == "thinking" else (f" {C_CYAN}⚡ working{RESET}" if state in ["working", "tool_use"] else "")
+    state_str = _format_agent_state(data, include_label=True)
     model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
 
     exec_mode = resolve_execution_mode(data)
@@ -667,11 +681,11 @@ def render_large(data: Dict[str, Any]):
     model_name = get_model_name(data)
     model_disp = f"🤖 Model: {BOLD}{C_TEAL}{model_name}{RESET}"
 
-    state = data.get("agent_state", "").lower()
+    state = str(data.get("agent_state") or "").lower()
     if state == "thinking":
         state_icon, state_label = "🤔", "THINKING"
     elif state in ["working", "tool_use"]:
-        state_icon, state_label = "⚡", "WORKING"
+        state_icon, state_label = f"{C_CYAN}{_spinner()}{RESET}", "WORKING"
     else:
         state_icon, state_label = "💤", "IDLE"
     state_disp = f"{state_icon} State: {C_PINK}{state_label}{RESET}"
@@ -824,6 +838,7 @@ def _test_bucket_scoping() -> bool:
     """
     cases = [
         ("Gemini 3.8 Flash (High)", "gemini-weekly", "gemini-5h"),
+        ("Gemini 4 Hydrogen (XHigh)", "gemini-weekly", "gemini-5h"),
         ("Claude Sonnet 4.5", "3p-weekly", "3p-5h"),
         ("GPT-5.1 (Medium)", "3p-weekly", "3p-5h"),
     ]

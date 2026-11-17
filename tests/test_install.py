@@ -17,11 +17,11 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 class InstallEffortStyleTest(unittest.TestCase):
     def test_saved_styles_render_in_every_size_and_allow_environment_override(self):
         styles = {
-            "original": ("(Low)", "(Medium)", "(High)"),
-            "dots": ("●○○", "●●○", "●●●"),
-            "bars": ("▰▱▱", "▰▰▱", "▰▰▰"),
-            "minimal": ("L", "M", "H"),
-            "TEXT": ("(Low)", "(Medium)", "(High)"),
+            "original": ("(Low)", "(Medium)", "(High)", "(XHigh)", "(Max)"),
+            "dots": ("●○○", "●●○", "●●●", "●●●+", "●●●⚡"),
+            "bars": ("▰▱▱", "▰▰▱", "▰▰▰", "▰▰▰+", "▰▰▰⚡"),
+            "minimal": ("L", "M", "H", "XH", "MAX"),
+            "TEXT": ("(Low)", "(Medium)", "(High)", "(XHigh)", "(Max)"),
         }
         with tempfile.TemporaryDirectory() as directory:
             for size in ("micro", "small", "medium", "large"):
@@ -40,7 +40,7 @@ class InstallEffortStyleTest(unittest.TestCase):
                         settings = json.loads((target / "settings.json").read_text())
                         self.assertEqual("preserved", settings["custom"])
                         self.assertEqual(f"bash {target / 'statusline.sh'}", settings["statusLine"]["command"])
-                        for level, label in zip(("Low", "Medium", "High"), labels):
+                        for level, label in zip(("Low", "Medium", "High", "XHigh", "Max"), labels):
                             result = subprocess.run(
                                 ["bash", str(target / "statusline.sh"), "--no-autoshrink"],
                                 input=json.dumps({"model": f"Gemini 4 Argon ({level})"}),

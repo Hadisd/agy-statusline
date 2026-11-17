@@ -197,5 +197,106 @@ class QuotaRefreshTest(unittest.TestCase):
             self.assertIn("7D 31%", render())
 
 
+class ModelEffortFormattingTest(unittest.TestCase):
+    def test_effort_levels_across_styles_and_hydrogen_quota_scoping(self):
+        cases = {
+            "dots": {
+                "Low": "●○○",
+                "Medium": "●●○",
+                "High": "●●●",
+                "XHigh": "●●●+",
+                "Max": "●●●⚡",
+                "xhigh": "●●●+",
+            },
+            "bars": {
+                "Low": "▰▱▱",
+                "Medium": "▰▰▱",
+                "High": "▰▰▰",
+                "XHigh": "▰▰▰+",
+                "Max": "▰▰▰⚡",
+            },
+            "minimal": {
+                "Low": "L",
+                "Medium": "M",
+                "High": "H",
+                "XHigh": "XH",
+                "Max": "MAX",
+            },
+            "original": {
+                "Low": "(Low)",
+                "Medium": "(Medium)",
+                "High": "(High)",
+                "XHigh": "(XHigh)",
+                "Max": "(Max)",
+            },
+        }
+        for style, mapping in cases.items():
+            with patch.dict(os.environ, {"AGY_STATUSLINE_EFFORT_STYLE": style}):
+                for level, expected in mapping.items():
+                    with self.subTest(style=style, level=level):
+                        rendered = statusline_engine.get_model_name(
+                            {"model": {"display_name": f"Gemini 4 Hydrogen ({level})"}}
+                        )
+                        self.assertEqual(f"Gemini 4 Hydrogen {expected}", rendered)
+
+        with patch.dict(os.environ, {"AGY_STATUSLINE_EFFORT_STYLE": "dots"}):
+            self.assertEqual(
+                "Orchestrator (Argon 🔥)",
+                statusline_engine.get_model_name({"model": {"display_name": "Orchestrator (Argon)"}}),
+            )
+            payload = {
+                "model": {"display_name": "Gemini 4 Hydrogen (XHigh)"},
+                "quota": {
+                    "gemini-argon-wtu-weekly": {"remaining_fraction": 0.7},
+                    "gemini-weekly": {"remaining_fraction": 0.9},
+                    "gemini-5h": {"remaining_fraction": 0.8},
+                },
+            }
+            output = io.StringIO()
+            with redirect_stdout(output):
+                statusline_engine.render_micro(payload)
+            plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+            self.assertIn("Gemini 4 Hydrogen ●●●+", plain)
+            self.assertIn("5H 20%", plain)
+            self.assertIn("7D 10%", plain)
+
+
+class AgentStateRenderingTest(unittest.TestCase):
+    def test_small_uses_colored_spinner_only_and_large_keeps_labels(self):
+        with patch.object(statusline_engine.time, "time", return_value=0.0):
+            spinner = statusline_engine._SPINNER_FRAMES[0]
+            for state, expected_color in (
+                ("working", statusline_engine.C_CYAN),
+                ("tool_use", statusline_engine.C_CYAN),
+                ("thinking", statusline_engine.C_PINK),
+            ):
+                with self.subTest(size="small", state=state):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        statusline_engine.render_small({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
+                    raw = output.getvalue()
+                    plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", raw)
+                    self.assertIn(f"{expected_color}{spinner}{statusline_engine.RESET}", raw)
+                    self.assertIn(f"Gemini 4 Hydrogen ●●● {spinner} │", plain)
+                    self.assertNotIn("working", plain.lower())
+                    self.assertNotIn("thinking", plain.lower())
+                    self.assertNotIn("⚡", plain)
+                    self.assertNotIn("🤔", plain)
+
+            for state, expected_text in (
+                ("working", f"{spinner} State: WORKING"),
+                ("tool_use", f"{spinner} State: WORKING"),
+                ("thinking", "🤔 State: THINKING"),
+                ("", "💤 State: IDLE"),
+            ):
+                with self.subTest(size="large", state=state):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        statusline_engine.render_large({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
+                    plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+                    self.assertIn(expected_text, plain)
+                    self.assertNotIn("⚡", plain)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,12 +54,12 @@ Argon models show `🔥` after the name in every size, for example
 
 Choose an effort style during installation:
 
-| Style | Low | Medium | High |
-|---|---|---|---|
-| `original` | `(Low)` | `(Medium)` | `(High)` |
-| `dots` (default) | `●○○` | `●●○` | `●●●` |
-| `bars` | `▰▱▱` | `▰▰▱` | `▰▰▰` |
-| `minimal` | `L` | `M` | `H` |
+| Style | Low | Medium | High | XHigh | Max |
+|---|---|---|---|---|---|
+| `original` | `(Low)` | `(Medium)` | `(High)` | `(XHigh)` | `(Max)` |
+| `dots` (default) | `●○○` | `●●○` | `●●●` | `●●●+` | `●●●⚡` |
+| `bars` | `▰▱▱` | `▰▰▱` | `▰▰▰` | `▰▰▰+` | `▰▰▰⚡` |
+| `minimal` | `L` | `M` | `H` | `XH` | `MAX` |
 
 Your choice is saved in the installed wrapper. Set `AGY_STATUSLINE_EFFORT_STYLE`
 to override it; `text` also works as an alias for `original`. Models without
