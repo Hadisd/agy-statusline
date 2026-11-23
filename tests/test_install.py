@@ -46,14 +46,15 @@ class InstallEffortStyleTest(unittest.TestCase):
                                 input=json.dumps({"model": f"Gemini 4 Argon ({level})"}),
                                 env=env, capture_output=True, text=True, check=True, timeout=3,
                             )
-                            self.assertIn(f"Gemini 4 Argon 🔥 {label}", result.stdout)
+                            self.assertIn(f"Gemini 4 Argon {label}", result.stdout)
+                            self.assertNotIn("🔥", result.stdout)
                         result = subprocess.run(
                             ["bash", str(target / "statusline.sh"), "--no-autoshrink"],
                             input=json.dumps({"model": "Gemini 4 Argon (Medium)"}),
                             env={**env, "AGY_STATUSLINE_EFFORT_STYLE": "text"},
                             capture_output=True, text=True, check=True, timeout=3,
                         )
-                        self.assertIn("Gemini 4 Argon 🔥 (Medium)", result.stdout)
+                        self.assertIn("Gemini 4 Argon (Medium)", result.stdout)
 
     def test_noninteractive_default_and_invalid_style(self):
         with tempfile.TemporaryDirectory() as directory:

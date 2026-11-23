@@ -31,6 +31,7 @@ from typing import Dict, List, Any, Optional, Tuple
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
+DIM = "\033[2m"
 CLR = "\033[K"
 
 # Named roles (teal/pink/peach/...) are a Catppuccin convention; the other
@@ -208,18 +209,19 @@ def find_quota_buckets(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, 
     model_obj = data.get("model")
     model_name = ""
     if isinstance(model_obj, dict):
-        model_name = (model_obj.get("display_name") or model_obj.get("id") or "").lower()
+        model_name = f"{model_obj.get('display_name') or ''} {model_obj.get('id') or ''}".lower()
     elif isinstance(model_obj, str):
         model_name = model_obj.lower()
 
-    # Pro's Argon bucket is weekly only. Ultra can share the Gemini group.
+    # Pro's Argon bucket is weekly only when present; once merged into Gemini
+    # Models (or on Ultra), Argon uses the shared Gemini buckets.
     group_hints: List[str] = []
     if any(name in model_name for name in ("claude", "gpt")):
         group_hints = ["3p", "claude", "gpt"]
     elif "argon" in model_name:
         has_argon = any("argon" in key.lower() for key in quota)
-        group_hints = ["argon"] if has_argon or "ultra" not in str(data.get("plan_tier", "")).lower() else ["gemini"]
-    elif "gemini" in model_name:
+        group_hints = ["argon"] if has_argon and "ultra" not in str(data.get("plan_tier", "")).lower() else ["gemini"]
+    elif any(name in model_name for name in ("gemini", "orchestrator", "neon", "carbon", "hydrogen", "flash")):
         group_hints = ["gemini"]
 
     def pick(keywords: List[str]) -> Dict[str, Any]:
@@ -345,7 +347,14 @@ def apply_live_quota(data: Dict[str, Any]) -> None:
                 except (ValueError, OverflowError, OSError):
                     pass
         # Cached aliases must precede session keys because selection uses order.
-        data["quota"] = {**live, **{key: bucket for key, bucket in quota.items() if key not in live}}
+        has_live_argon = any("argon" in k.lower() for k in live)
+        data["quota"] = {
+            **live,
+            **{
+                key: bucket for key, bucket in quota.items()
+                if key not in live and (has_live_argon or "argon" not in key.lower())
+            },
+        }
     if age < 60 or now < state.get("retry_after", 0):
         return
     lock = _quota_cache_path().with_suffix(".lock")
@@ -400,7 +409,7 @@ def get_model_name(data: Dict[str, Any]) -> str:
             r"\s*\((low|medium|high|xhigh|max)\)\s*$",
             lambda match: " " + effort_labels[match.group(1).lower()], model_name, flags=re.IGNORECASE,
         )
-    return re.sub(r"\bargon\b", r"\g<0> 🔥", model_name, flags=re.IGNORECASE)
+    return model_name
 
 def format_dir_path(cwd: str, max_len: Optional[int] = None) -> str:
     home = os.path.expanduser("~")
@@ -566,19 +575,29 @@ def get_git_status(cwd: str, vcs_payload: Optional[Dict[str, Any]] = None) -> Tu
             return branch, f"{C_GREEN}🌿({branch}){RESET}{mod_disp}", {"staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0}, mod_disp
         return "", "", {"staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0}, ""
 
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_AGENT_STATES = {
+    "thinking": ("🤔", "thinking"),
+    "working": ("✨", "working"),
+    "tool_use": ("🔧", "working"),
+}
 
-def _spinner() -> str:
-    return _SPINNER_FRAMES[int(time.time() * 4) % len(_SPINNER_FRAMES)]
+def _agent_state_info(data: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    state = str(data.get("agent_state") or "").lower()
+    entry = _AGENT_STATES.get(state)
+    if not entry:
+        return None
+    glyph, label = entry
+    color = C_PINK if state == "thinking" else (C_PEACH if state == "tool_use" else C_CYAN)
+    return glyph, color, label
+
+def _pipe() -> str:
+    return f"{DIM}{C_SUBTEXT}│{RESET}"
 
 def _format_agent_state(data: Dict[str, Any], *, include_label: bool) -> str:
-    state = str(data.get("agent_state") or "").lower()
-    if state == "thinking":
-        glyph, color, label = (_spinner(), C_PINK, "thinking") if not include_label else ("🤔", C_PINK, "thinking")
-    elif state in ("working", "tool_use"):
-        glyph, color, label = _spinner(), C_CYAN, "working"
-    else:
+    info = _agent_state_info(data)
+    if not info:
         return ""
+    glyph, color, label = info
     suffix = f" {label}" if include_label else ""
     return f" {color}{glyph}{suffix}{RESET}"
 
@@ -610,7 +629,8 @@ def render_small(data: Dict[str, Any]):
     dirty_part = f" {dirty_disp}" if dirty_disp else ""
     mode_part = f" {mode_disp}" if mode_disp else ""
 
-    line1 = f"{model_disp} │ {dir_disp}{git_part}{art_disp}{dirty_part}{mode_part}"
+    sep = _pipe()
+    line1 = f"{model_disp} {sep} {dir_disp}{git_part}{art_disp}{dirty_part}{mode_part}"
 
     ctx_pct = _safe_dict(data.get("context_window")).get("used_percentage", 0.0)
     cr, cg, cb = get_context_color(ctx_pct)
@@ -628,16 +648,17 @@ def render_small(data: Dict[str, Any]):
     wr, wg, wb = get_7d_color(w_pct)
     w_disp = f"{C_YELLOW}7D{RESET} {_quota_bar(w_data, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{_quota_text(w_data)}{RESET}{_warn_icon(w_pct)}" + (f" ({w_reset})" if w_reset else "")
 
-    line2 = f"{ctx_disp} │ {f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
+    line2 = f" {sep} ".join([ctx_disp, f_disp, w_disp, f"{C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"])
     print(f"{line1}{CLR}\n{line2}{CLR}")
 
 def render_medium(data: Dict[str, Any]):
+    sep = _pipe()
     model_name = get_model_name(data)
     state_str = _format_agent_state(data, include_label=True)
     model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
 
     exec_mode = resolve_execution_mode(data)
-    mode_disp = f" │ 🎯 {mode_color(exec_mode)}{exec_mode.upper()}{RESET}" if exec_mode else ""
+    mode_disp = f" {sep} 🎯 {mode_color(exec_mode)}{exec_mode.upper()}{RESET}" if exec_mode else ""
 
     tasks = data.get("task_count", 0)
     artifacts = data.get("artifact_count", 0)
@@ -646,7 +667,7 @@ def render_medium(data: Dict[str, Any]):
         task_parts.append(f"{C_LAVENDER}📄 Artifacts {artifacts}{RESET}")
     if tasks > 0:
         task_parts.append(f"{C_PEACH}⚙️ Tasks {tasks}{RESET}")
-    task_disp = (" │ " + " │ ".join(task_parts)) if task_parts else f" │ {C_SUBTEXT}📄 Artifacts 0{RESET}"
+    task_disp = (f" {sep} " + f" {sep} ".join(task_parts)) if task_parts else f" {sep} {C_SUBTEXT}📄 Artifacts 0{RESET}"
 
     line1 = f"{model_disp}{task_disp}{mode_disp}"
 
@@ -674,18 +695,18 @@ def render_medium(data: Dict[str, Any]):
     wr, wg, wb = get_7d_color(w_pct)
     w_disp = f"{C_YELLOW}7D{RESET} {_quota_bar(w_data, 10, '7d')} {BOLD}\033[38;2;{wr};{wg};{wb}m{_quota_text(w_data)}{RESET}{_warn_icon(w_pct)}" + (f" ({w_reset})" if w_reset else "")
 
-    line3 = f"{ctx_disp} │ {f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
+    line3 = f" {sep} ".join([ctx_disp, f_disp, w_disp, f"{C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"])
     print(f"{line1}{CLR}\n{line2}{CLR}\n{line3}{CLR}")
 
 def render_large(data: Dict[str, Any]):
+    sep = _pipe()
     model_name = get_model_name(data)
     model_disp = f"🤖 Model: {BOLD}{C_TEAL}{model_name}{RESET}"
 
-    state = str(data.get("agent_state") or "").lower()
-    if state == "thinking":
-        state_icon, state_label = "🤔", "THINKING"
-    elif state in ["working", "tool_use"]:
-        state_icon, state_label = f"{C_CYAN}{_spinner()}{RESET}", "WORKING"
+    info = _agent_state_info(data)
+    if info:
+        state_icon, _, label = info
+        state_label = label.upper()
     else:
         state_icon, state_label = "💤", "IDLE"
     state_disp = f"{state_icon} State: {C_PINK}{state_label}{RESET}"
@@ -695,9 +716,9 @@ def render_large(data: Dict[str, Any]):
     mode_disp = f"🎯 Mode: {mode_color(exec_mode)}{mode_str}{RESET}"
 
     artifacts = data.get("artifact_count", 0)
-    art_disp = f" │ 📄 Artifacts: {C_LAVENDER}{artifacts}{RESET}"
+    art_disp = f" {sep} 📄 Artifacts: {C_LAVENDER}{artifacts}{RESET}"
 
-    line1 = f"{model_disp} │ {state_disp}{art_disp} │ {mode_disp}"
+    line1 = f"{model_disp} {sep} {state_disp}{art_disp} {sep} {mode_disp}"
 
     cwd = _safe_dict(data.get("workspace")).get("current_dir") or data.get("cwd") or os.getcwd()
     dir_path = format_dir_path(cwd)
@@ -721,7 +742,7 @@ def render_large(data: Dict[str, Any]):
     else:
         git_disp = ""
 
-    line2 = f"{dir_disp} │ {git_disp}" if git_disp else dir_disp
+    line2 = f"{dir_disp} {sep} {git_disp}" if git_disp else dir_disp
 
     ctx = _safe_dict(data.get("context_window"))
     ctx_pct = ctx.get("used_percentage", 0.0)
@@ -749,12 +770,13 @@ def render_large(data: Dict[str, Any]):
     wr, wg, wb = get_7d_color(w_pct)
     w_disp = f"📅 7D Quota: {BOLD}\033[38;2;{wr};{wg};{wb}m{_quota_text(w_data)}{RESET}{_warn_icon(w_pct)} [{_quota_bar(w_data, 12, '7d')}]" + (f" ({w_reset})" if w_reset else "")
 
-    line4 = f"{f_disp} │ {w_disp} │ {C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"
+    line4 = f" {sep} ".join([f_disp, w_disp, f"{C_SUBTEXT}🕒 {time.strftime('%H:%M:%S')}{RESET}"])
     print(f"{line1}{CLR}\n{line2}{CLR}\n{line3}{CLR}\n{line4}{CLR}")
 
 def render_micro(data: Dict[str, Any]):
     """1-line, no-bars layout for very cramped panes (tmux/screen status
     bars, split panes): model name plus Ctx/5H/7D percentages only."""
+    sep = _pipe()
     model_name = get_model_name(data)
     model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}"
 
@@ -772,7 +794,7 @@ def render_micro(data: Dict[str, Any]):
     wr, wg, wb = get_7d_color(w_pct)
     w_disp = f"{C_YELLOW}7D{RESET} {BOLD}\033[38;2;{wr};{wg};{wb}m{_quota_text(w_data)}{RESET}{_warn_icon(w_pct)}"
 
-    line1 = f"{model_disp} │ {ctx_disp} │ {f_disp} │ {w_disp}"
+    line1 = f" {sep} ".join([model_disp, ctx_disp, f_disp, w_disp])
     print(f"{line1}{CLR}")
 
 RENDERERS = {
@@ -839,6 +861,12 @@ def _test_bucket_scoping() -> bool:
     cases = [
         ("Gemini 3.8 Flash (High)", "gemini-weekly", "gemini-5h"),
         ("Gemini 4 Hydrogen (XHigh)", "gemini-weekly", "gemini-5h"),
+        ("Gemini 4 Neon (High)", "gemini-weekly", "gemini-5h"),
+        ("Gemini 4 Carbon (Medium)", "gemini-weekly", "gemini-5h"),
+        ("Gemini 4 Argon (Medium)", "gemini-weekly", "gemini-5h"),
+        ("Orchestrator (Neon)", "gemini-weekly", "gemini-5h"),
+        ("Orchestrator (Carbon)", "gemini-weekly", "gemini-5h"),
+        ("Orchestrator (Argon)", "gemini-weekly", "gemini-5h"),
         ("Claude Sonnet 4.5", "3p-weekly", "3p-5h"),
         ("GPT-5.1 (Medium)", "3p-weekly", "3p-5h"),
     ]

@@ -66,6 +66,33 @@ class ArgonQuotaDisplayTest(unittest.TestCase):
                 self.assertIn("N/A", five_hour)
                 self.assertIn("17%", plain)
 
+    def test_argon_and_orchestrator_use_shared_gemini_buckets_when_merged(self):
+        quota = {
+            "3p-5h": {"remaining_fraction": 1.0},
+            "3p-weekly": {"remaining_fraction": 0.0},
+            "gemini-5h": {"remaining_fraction": 0.92},
+            "gemini-weekly": {"remaining_fraction": 0.98},
+        }
+        models = (
+            "Gemini 4 Argon (Medium)",
+            "Gemini 4 Neon (XHigh)",
+            "Gemini 4 Carbon (High)",
+            "Gemini 4 Hydrogen (High)",
+            "Orchestrator (Neon)",
+            "Orchestrator (Carbon)",
+            "Orchestrator (Argon)",
+        )
+        for model in models:
+            with self.subTest(model=model):
+                payload = {"model": {"display_name": model}, "plan_tier": "Google AI Pro", "quota": quota}
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    statusline_engine.render_micro(payload)
+                plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+                self.assertIn("5H 8%", plain)
+                self.assertIn("7D 2%", plain)
+                self.assertNotIn("🔥", plain)
+
 
 class QuotaRefreshTest(unittest.TestCase):
     def test_malformed_cache_timestamps_do_not_blank_the_statusline(self):
@@ -138,6 +165,32 @@ class QuotaRefreshTest(unittest.TestCase):
                     payload["model"] = "Claude Sonnet"
                     weekly, _ = statusline_engine.find_quota_buckets(payload)
                     self.assertEqual("90%", statusline_engine._quota_text(weekly))
+
+    def test_merged_live_cache_replaces_stale_session_argon_bucket(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "XDG_CACHE_HOME": directory, "AGY_STATUSLINE_LIVE_QUOTA": "1",
+        }):
+            cache = statusline_engine._quota_cache_path()
+            cache.parent.mkdir(parents=True)
+            cache.write_text(json.dumps({
+                "ts": now,
+                "quota": {
+                    "gemini-weekly": {"remaining_fraction": 0.96},
+                    "gemini-5h": {"remaining_fraction": 0.86},
+                },
+            }))
+            payload = {
+                "model": {"display_name": "Gemini 4 Argon (Medium)"},
+                "plan_tier": "Google AI Pro",
+                "quota": {
+                    "gemini-argon-wtu-weekly": {"remaining_fraction": 0.70},
+                },
+            }
+            statusline_engine.apply_live_quota(payload)
+            weekly, five_hour = statusline_engine.find_quota_buckets(payload)
+            self.assertEqual("4%", statusline_engine._quota_text(weekly))
+            self.assertEqual("14%", statusline_engine._quota_text(five_hour))
 
     def test_cli_refresh_replaces_stale_argon_quota_in_rendered_output(self):
         engine = Path(statusline_engine.__file__).resolve()
@@ -241,8 +294,12 @@ class ModelEffortFormattingTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"AGY_STATUSLINE_EFFORT_STYLE": "dots"}):
             self.assertEqual(
-                "Orchestrator (Argon 🔥)",
+                "Orchestrator (Argon)",
                 statusline_engine.get_model_name({"model": {"display_name": "Orchestrator (Argon)"}}),
+            )
+            self.assertEqual(
+                "Gemini 4 Argon ●●○",
+                statusline_engine.get_model_name({"model": {"display_name": "Gemini 4 Argon (Medium)"}}),
             )
             payload = {
                 "model": {"display_name": "Gemini 4 Hydrogen (XHigh)"},
@@ -262,40 +319,54 @@ class ModelEffortFormattingTest(unittest.TestCase):
 
 
 class AgentStateRenderingTest(unittest.TestCase):
-    def test_small_uses_colored_spinner_only_and_large_keeps_labels(self):
-        with patch.object(statusline_engine.time, "time", return_value=0.0):
-            spinner = statusline_engine._SPINNER_FRAMES[0]
-            for state, expected_color in (
-                ("working", statusline_engine.C_CYAN),
-                ("tool_use", statusline_engine.C_CYAN),
-                ("thinking", statusline_engine.C_PINK),
-            ):
-                with self.subTest(size="small", state=state):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        statusline_engine.render_small({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
-                    raw = output.getvalue()
-                    plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", raw)
-                    self.assertIn(f"{expected_color}{spinner}{statusline_engine.RESET}", raw)
-                    self.assertIn(f"Gemini 4 Hydrogen ●●● {spinner} │", plain)
-                    self.assertNotIn("working", plain.lower())
-                    self.assertNotIn("thinking", plain.lower())
-                    self.assertNotIn("⚡", plain)
-                    self.assertNotIn("🤔", plain)
+    def test_small_uses_distinct_state_emojis_and_large_keeps_labels(self):
+        for state, expected_glyph, expected_color in (
+            ("working", "✨", statusline_engine.C_CYAN),
+            ("tool_use", "🔧", statusline_engine.C_PEACH),
+            ("thinking", "🤔", statusline_engine.C_PINK),
+        ):
+            with self.subTest(size="small", state=state):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    statusline_engine.render_small({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
+                raw = output.getvalue()
+                plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", raw)
+                self.assertIn(f"{expected_color}{expected_glyph}{statusline_engine.RESET}", raw)
+                self.assertIn(f"Gemini 4 Hydrogen ●●● {expected_glyph} │", plain)
+                self.assertNotIn("working", plain.lower())
+                self.assertNotIn("thinking", plain.lower())
+                self.assertNotIn("⚡", plain)
 
-            for state, expected_text in (
-                ("working", f"{spinner} State: WORKING"),
-                ("tool_use", f"{spinner} State: WORKING"),
-                ("thinking", "🤔 State: THINKING"),
-                ("", "💤 State: IDLE"),
-            ):
-                with self.subTest(size="large", state=state):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        statusline_engine.render_large({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
-                    plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
-                    self.assertIn(expected_text, plain)
-                    self.assertNotIn("⚡", plain)
+        for state, expected_text in (
+            ("working", "✨ State: WORKING"),
+            ("tool_use", "🔧 State: WORKING"),
+            ("thinking", "🤔 State: THINKING"),
+            ("", "💤 State: IDLE"),
+        ):
+            with self.subTest(size="large", state=state):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    statusline_engine.render_large({"model": "Gemini 4 Hydrogen (High)", "agent_state": state})
+                plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+                self.assertIn(expected_text, plain)
+                self.assertNotIn("⚡", plain)
+
+    def test_pipe_separators_are_dimmed_across_all_sizes(self):
+        expected_pipe = f"{statusline_engine.DIM}{statusline_engine.C_SUBTEXT}│{statusline_engine.RESET}"
+        payload = {"model": "Gemini 4 Hydrogen (High)", "agent_state": "working", "cycle_mode": "plan"}
+        for renderer in (
+            statusline_engine.render_micro,
+            statusline_engine.render_small,
+            statusline_engine.render_medium,
+            statusline_engine.render_large,
+        ):
+            with self.subTest(renderer=renderer.__name__):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    renderer(payload)
+                raw = output.getvalue()
+                self.assertIn(expected_pipe, raw)
+                self.assertEqual(raw.count("│"), raw.count(expected_pipe))
 
 
 if __name__ == "__main__":
