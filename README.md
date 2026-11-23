@@ -47,7 +47,7 @@ Restart `agy` afterward. Re-running swaps the previous install (settings backed 
 
 ## What it shows
 
-🤖 model · 🎯 permission mode (plan/accept-edits) · 📂 path · 🌿 git branch + dirty status · 📄/⚙️ artifact & task counts · 🧠 context window · 5H/7D quota bars (scoped to the active model's group) · ⚠️ once any of those crosses 90%.
+🤖 model (`🎼` for Orchestrator, compact in `micro`/`small`/`medium`, e.g., `🎼 Orchestrator · Neon`) · 🎯 permission mode (plan/accept-edits) · 📂 path · 🌿 git branch + dirty status · 📄/⚙️ artifact & task counts · 🧠 context window · 5H/7D quota bars (scoped to the active model's group) · ⚠️ once any of those crosses 90%.
 
 Choose an effort style during installation:
 

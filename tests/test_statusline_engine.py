@@ -324,6 +324,10 @@ class AgentStateRenderingTest(unittest.TestCase):
             ("working", "✨", statusline_engine.C_CYAN),
             ("tool_use", "🔧", statusline_engine.C_PEACH),
             ("thinking", "🤔", statusline_engine.C_PINK),
+            ("reviewing", "👀", statusline_engine.C_LAVENDER),
+            ("initializing", "⏳", statusline_engine.C_YELLOW),
+            ("authenticating", "🔑", statusline_engine.C_YELLOW),
+            ("error", "❌", statusline_engine.C_RED),
         ):
             with self.subTest(size="small", state=state):
                 output = io.StringIO()
@@ -335,12 +339,20 @@ class AgentStateRenderingTest(unittest.TestCase):
                 self.assertIn(f"Gemini 4 Hydrogen ●●● {expected_glyph} │", plain)
                 self.assertNotIn("working", plain.lower())
                 self.assertNotIn("thinking", plain.lower())
+                self.assertNotIn("reviewing", plain.lower())
+                self.assertNotIn("init", plain.lower())
+                self.assertNotIn("auth", plain.lower())
+                self.assertNotIn("error", plain.lower())
                 self.assertNotIn("⚡", plain)
 
         for state, expected_text in (
             ("working", "✨ State: WORKING"),
             ("tool_use", "🔧 State: WORKING"),
             ("thinking", "🤔 State: THINKING"),
+            ("reviewing", "👀 State: REVIEWING"),
+            ("initializing", "⏳ State: INIT"),
+            ("authenticating", "🔑 State: AUTH"),
+            ("error", "❌ State: ERROR"),
             ("", "💤 State: IDLE"),
         ):
             with self.subTest(size="large", state=state):
@@ -367,6 +379,43 @@ class AgentStateRenderingTest(unittest.TestCase):
                 raw = output.getvalue()
                 self.assertIn(expected_pipe, raw)
                 self.assertEqual(raw.count("│"), raw.count(expected_pipe))
+
+
+class OrchestratorDisplayTest(unittest.TestCase):
+    def test_orchestrator_uses_distinct_icon_and_compact_labels(self):
+        cases = (
+            ("Orchestrator (Neon)", {
+                "micro": "🎼 Orch (Neon)",
+                "small": "🎼 Orchestrator · Neon",
+                "medium": "🎼 Orchestrator · Neon",
+                "large": "🎼 Model: Orchestrator (Neon)",
+            }),
+            ("Orchestrator", {
+                "micro": "🎼 Orch",
+                "small": "🎼 Orchestrator",
+                "medium": "🎼 Orchestrator",
+                "large": "🎼 Model: Orchestrator",
+            }),
+        )
+        for model_name, expected_by_size in cases:
+            payload = {"model": {"display_name": model_name}}
+            for size, expected in expected_by_size.items():
+                with self.subTest(model=model_name, size=size):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        statusline_engine.RENDERERS[size](payload)
+                    plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+                    self.assertIn(expected, plain)
+                    self.assertNotIn("🤖", plain)
+
+        for size in statusline_engine.RENDERERS:
+            with self.subTest(model="Gemini 4 Neon (High)", size=size):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    statusline_engine.RENDERERS[size]({"model": {"display_name": "Gemini 4 Neon (High)"}})
+                plain = re.sub(r"\x1b\[[0-9;]*[mK]", "", output.getvalue())
+                self.assertIn("🤖", plain)
+                self.assertNotIn("🎼", plain)
 
 
 if __name__ == "__main__":

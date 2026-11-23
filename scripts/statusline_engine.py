@@ -411,6 +411,33 @@ def get_model_name(data: Dict[str, Any]) -> str:
         )
     return model_name
 
+def _is_orchestrator(data: Dict[str, Any]) -> bool:
+    model_obj = data.get("model")
+    if isinstance(model_obj, dict):
+        text = f"{model_obj.get('display_name') or ''} {model_obj.get('id') or ''}"
+    elif isinstance(model_obj, str):
+        text = model_obj
+    else:
+        text = os.environ.get("AGY_MODEL", "")
+    return "orchestrator" in text.lower()
+
+def _model_icon(data: Dict[str, Any]) -> str:
+    return "🎼" if _is_orchestrator(data) else "🤖"
+
+def _format_model_name(data: Dict[str, Any], *, size: str) -> str:
+    name = get_model_name(data)
+    if not _is_orchestrator(data):
+        return name
+    match = re.match(r"^orchestrator(?:\s*\((.+)\))?$", name.strip(), flags=re.IGNORECASE)
+    if not match:
+        return name
+    planner = (match.group(1) or "").strip()
+    if size == "micro":
+        return f"Orch ({planner})" if planner else "Orch"
+    if size in ("small", "medium"):
+        return f"Orchestrator · {planner}" if planner else "Orchestrator"
+    return name
+
 def format_dir_path(cwd: str, max_len: Optional[int] = None) -> str:
     home = os.path.expanduser("~")
     dir_path = "~" if cwd == home else (f"~{cwd[len(home):]}" if cwd.startswith(home + "/") else cwd)
@@ -579,6 +606,10 @@ _AGENT_STATES = {
     "thinking": ("🤔", "thinking"),
     "working": ("✨", "working"),
     "tool_use": ("🔧", "working"),
+    "reviewing": ("👀", "reviewing"),
+    "initializing": ("⏳", "init"),
+    "authenticating": ("🔑", "auth"),
+    "error": ("❌", "error"),
 }
 
 def _agent_state_info(data: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
@@ -587,8 +618,16 @@ def _agent_state_info(data: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
     if not entry:
         return None
     glyph, label = entry
-    color = C_PINK if state == "thinking" else (C_PEACH if state == "tool_use" else C_CYAN)
-    return glyph, color, label
+    colors = {
+        "thinking": C_PINK,
+        "working": C_CYAN,
+        "tool_use": C_PEACH,
+        "reviewing": C_LAVENDER,
+        "initializing": C_YELLOW,
+        "authenticating": C_YELLOW,
+        "error": C_RED,
+    }
+    return glyph, colors.get(state, C_CYAN), label
 
 def _pipe() -> str:
     return f"{DIM}{C_SUBTEXT}│{RESET}"
@@ -602,9 +641,9 @@ def _format_agent_state(data: Dict[str, Any], *, include_label: bool) -> str:
     return f" {color}{glyph}{suffix}{RESET}"
 
 def render_small(data: Dict[str, Any]):
-    model_name = get_model_name(data)
+    model_name = _format_model_name(data, size="small")
     state_str = _format_agent_state(data, include_label=False)
-    model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
+    model_disp = f"{_model_icon(data)} {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
 
     exec_mode = resolve_execution_mode(data)
     mode_disp = f"{mode_color(exec_mode)}🎯 {exec_mode.upper()}{RESET}" if exec_mode else ""
@@ -653,9 +692,9 @@ def render_small(data: Dict[str, Any]):
 
 def render_medium(data: Dict[str, Any]):
     sep = _pipe()
-    model_name = get_model_name(data)
+    model_name = _format_model_name(data, size="medium")
     state_str = _format_agent_state(data, include_label=True)
-    model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
+    model_disp = f"{_model_icon(data)} {BOLD}{C_TEAL}{model_name}{RESET}{state_str}"
 
     exec_mode = resolve_execution_mode(data)
     mode_disp = f" {sep} 🎯 {mode_color(exec_mode)}{exec_mode.upper()}{RESET}" if exec_mode else ""
@@ -700,8 +739,8 @@ def render_medium(data: Dict[str, Any]):
 
 def render_large(data: Dict[str, Any]):
     sep = _pipe()
-    model_name = get_model_name(data)
-    model_disp = f"🤖 Model: {BOLD}{C_TEAL}{model_name}{RESET}"
+    model_name = _format_model_name(data, size="large")
+    model_disp = f"{_model_icon(data)} Model: {BOLD}{C_TEAL}{model_name}{RESET}"
 
     info = _agent_state_info(data)
     if info:
@@ -777,8 +816,8 @@ def render_micro(data: Dict[str, Any]):
     """1-line, no-bars layout for very cramped panes (tmux/screen status
     bars, split panes): model name plus Ctx/5H/7D percentages only."""
     sep = _pipe()
-    model_name = get_model_name(data)
-    model_disp = f"🤖 {BOLD}{C_TEAL}{model_name}{RESET}"
+    model_name = _format_model_name(data, size="micro")
+    model_disp = f"{_model_icon(data)} {BOLD}{C_TEAL}{model_name}{RESET}"
 
     ctx_pct = _safe_dict(data.get("context_window")).get("used_percentage", 0.0)
     cr, cg, cb = get_context_color(ctx_pct)
